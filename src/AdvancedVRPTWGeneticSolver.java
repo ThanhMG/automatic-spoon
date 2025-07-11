@@ -818,3 +818,681 @@ public class AdvancedVRPTWGeneticSolver {
             
             population.calculateStatistics();
         }
+
+        private Individual createRandomIndividual() {
+            Individual individual = new Individual();
+            List<Integer> unassignedCustomers = IntStream.range(0, NUM_CUSTOMERS)
+                    .boxed()
+                    .collect(Collectors.toList());
+            Collections.shuffle(unassignedCustomers, random);
+            
+            // Use different construction heuristics randomly
+            double heuristicChoice = random.nextDouble();
+            
+            if (heuristicChoice < 0.3) {
+                // Nearest neighbor with time window priority
+                individual = nearestNeighborConstruction(unassignedCustomers);
+            } else if (heuristicChoice < 0.6) {
+                // Savings algorithm
+                individual = savingsAlgorithmConstruction(unassignedCustomers);
+            } else if (heuristicChoice < 0.8) {
+                // Sweep algorithm
+                individual = sweepAlgorithmConstruction(unassignedCustomers);
+            } else {
+                // Random construction
+                individual = randomConstruction(unassignedCustomers);
+            }
+            
+            return individual;
+        }
+        
+        private Individual nearestNeighborConstruction(List<Integer> customers) {
+            Individual individual = new Individual();
+            List<Integer> unassigned = new ArrayList<>(customers);
+            
+            while (!unassigned.isEmpty()) {
+                Route route = new Route();
+                int currentCustomer = unassigned.remove(0);
+                route.customers.add(currentCustomer);
+                
+                double currentTime = depot.openTime + customers[currentCustomer].getDistanceToDepot(depot);
+                currentTime = Math.max(currentTime, customers[currentCustomer].earliestTime) + SERVICE_TIME;
+                int currentLoad = customers[currentCustomer].demand;
+                
+                boolean canAddMore = true;
+                while (canAddMore && !unassigned.isEmpty()) {
+                    int nearestCustomer = -1;
+                    double nearestDistance = Double.MAX_VALUE;
+                    
+                    for (int i = 0; i < unassigned.size(); i++) {
+                        int candidateCustomer = unassigned.get(i);
+                        
+                        // Check capacity constraint
+                        if (currentLoad + customers[candidateCustomer].demand > VEHICLE_CAPACITY) {
+                            continue;
+                        }
+                        
+                        // Check time window constraint
+                        double travelTime = customers[currentCustomer].getDistanceTo(customers[candidateCustomer]);
+                        double arrivalTime = currentTime + travelTime;
+                        
+                        if (arrivalTime <= customers[candidateCustomer].latestTime) {
+                            double distance = customers[currentCustomer].getDistanceTo(customers[candidateCustomer]);
+                            if (distance < nearestDistance) {
+                                nearestDistance = distance;
+                                nearestCustomer = candidateCustomer;
+                            }
+                        }
+                    }
+                    
+                    if (nearestCustomer != -1) {
+                        route.customers.add(nearestCustomer);
+                        unassigned.remove(Integer.valueOf(nearestCustomer));
+                        currentCustomer = nearestCustomer;
+                        
+                        double travelTime = nearestDistance;
+                        currentTime += travelTime;
+                        currentTime = Math.max(currentTime, customers[nearestCustomer].earliestTime) + SERVICE_TIME;
+                        currentLoad += customers[nearestCustomer].demand;
+                    } else {
+                        canAddMore = false;
+                    }
+                }
+                
+                individual.routes.add(route);
+            }
+            
+            return individual;
+        }
+        
+        private Individual savingsAlgorithmConstruction(List<Integer> customers) {
+            Individual individual = new Individual();
+            
+            // Calculate savings matrix
+            double[][] savings = new double[NUM_CUSTOMERS][NUM_CUSTOMERS];
+            List<SavingsPair> savingsList = new ArrayList<>();
+            
+            for (int i = 0; i < NUM_CUSTOMERS; i++) {
+                for (int j = i + 1; j < NUM_CUSTOMERS; j++) {
+                    double saving = customers[i].getDistanceToDepot(depot) + 
+                                  customers[j].getDistanceToDepot(depot) - 
+                                  customers[i].getDistanceTo(customers[j]);
+                    savings[i][j] = saving;
+                    savingsList.add(new SavingsPair(i, j, saving));
+                }
+            }
+            
+            // Sort savings in descending order
+            savingsList.sort((a, b) -> Double.compare(b.saving, a.saving));
+            
+            // Create initial routes (one customer per route)
+            Map<Integer, Route> customerToRoute = new HashMap<>();
+            for (int i = 0; i < NUM_CUSTOMERS; i++) {
+                Route route = new Route();
+                route.customers.add(i);
+                individual.routes.add(route);
+                customerToRoute.put(i, route);
+            }
+            
+            // Merge routes based on savings
+            for (SavingsPair pair : savingsList) {
+                Route route1 = customerToRoute.get(pair.customer1);
+                Route route2 = customerToRoute.get(pair.customer2);
+                
+                if (route1 != route2 && canMergeRoutes(route1, route2, pair.customer1, pair.customer2)) {
+                    Route mergedRoute = mergeRoutes(route1, route2, pair.customer1, pair.customer2);
+                    
+                    // Update individual routes
+                    individual.routes.remove(route1);
+                    individual.routes.remove(route2);
+                    individual.routes.add(mergedRoute);
+                    
+                    // Update customer-route mapping
+                    for (int customerId : mergedRoute.customers) {
+                        customerToRoute.put(customerId, mergedRoute);
+                    }
+                }
+            }
+            
+            return individual;
+        }
+        
+        private Individual sweepAlgorithmConstruction(List<Integer> customers) {
+            Individual individual = new Individual();
+            
+            // Calculate angles from depot to each customer
+            List<CustomerAngle> customerAngles = new ArrayList<>();
+            for (int i = 0; i < NUM_CUSTOMERS; i++) {
+                double angle = Math.atan2(customers[i].y - depot.y, customers[i].x - depot.x);
+                customerAngles.add(new CustomerAngle(i, angle));
+            }
+            
+            // Sort by angle
+            customerAngles.sort(Comparator.comparingDouble(ca -> ca.angle));
+            
+            // Create routes by sweeping
+            List<Integer> sortedCustomers = customerAngles.stream()
+                    .map(ca -> ca.customerId)
+                    .collect(Collectors.toList());
+            
+            List<Integer> unassigned = new ArrayList<>(sortedCustomers);
+            
+            while (!unassigned.isEmpty()) {
+                Route route = new Route();
+                int currentLoad = 0;
+                double currentTime = depot.openTime;
+                
+                Iterator<Integer> iterator = unassigned.iterator();
+                while (iterator.hasNext()) {
+                    int customerId = iterator.next();
+                    
+                    // Check capacity constraint
+                    if (currentLoad + customers[customerId].demand > VEHICLE_CAPACITY) {
+                        continue;
+                    }
+                    
+                    // Check time window constraint (simplified)
+                    double travelTime = (route.customers.isEmpty()) ? 
+                        customers[customerId].getDistanceToDepot(depot) :
+                        customers[route.customers.get(route.customers.size() - 1)].getDistanceTo(customers[customerId]);
+                    
+                    double arrivalTime = currentTime + travelTime;
+                    
+                    if (arrivalTime <= customers[customerId].latestTime) {
+                        route.customers.add(customerId);
+                        currentLoad += customers[customerId].demand;
+                        currentTime = Math.max(arrivalTime, customers[customerId].earliestTime) + SERVICE_TIME;
+                        iterator.remove();
+                    }
+                }
+                
+                if (!route.customers.isEmpty()) {
+                    individual.routes.add(route);
+                }
+                
+                // Add remaining customers to new routes
+                if (route.customers.isEmpty() && !unassigned.isEmpty()) {
+                    route.customers.add(unassigned.remove(0));
+                    individual.routes.add(route);
+                }
+            }
+            
+            return individual;
+        }
+        
+        private Individual randomConstruction(List<Integer> customers) {
+            Individual individual = new Individual();
+            List<Integer> unassigned = new ArrayList<>(customers);
+            Collections.shuffle(unassigned, random);
+            
+            while (!unassigned.isEmpty()) {
+                Route route = new Route();
+                int vehicleCapacity = VEHICLE_CAPACITY;
+                
+                Iterator<Integer> iterator = unassigned.iterator();
+                while (iterator.hasNext() && vehicleCapacity > 0) {
+                    int customerId = iterator.next();
+                    
+                    if (customers[customerId].demand <= vehicleCapacity) {
+                        route.customers.add(customerId);
+                        vehicleCapacity -= customers[customerId].demand;
+                        iterator.remove();
+                    }
+                }
+                
+                if (!route.customers.isEmpty()) {
+                    individual.routes.add(route);
+                } else if (!unassigned.isEmpty()) {
+                    // Force add one customer to avoid infinite loop
+                    route.customers.add(unassigned.remove(0));
+                    individual.routes.add(route);
+                }
+            }
+            
+            return individual;
+        }
+        
+        private boolean canMergeRoutes(Route route1, Route route2, int customer1, int customer2) {
+            // Check if routes can be merged without violating constraints
+            int totalDemand = route1.customers.stream().mapToInt(c -> customers[c].demand).sum() +
+                             route2.customers.stream().mapToInt(c -> customers[c].demand).sum();
+            
+            return totalDemand <= VEHICLE_CAPACITY;
+        }
+        
+        private Route mergeRoutes(Route route1, Route route2, int customer1, int customer2) {
+            Route merged = new Route();
+            
+            // Determine the best way to merge routes
+            List<Integer> sequence1 = new ArrayList<>(route1.customers);
+            List<Integer> sequence2 = new ArrayList<>(route2.customers);
+            
+            // Find positions of customers in their respective routes
+            int pos1 = sequence1.indexOf(customer1);
+            int pos2 = sequence2.indexOf(customer2);
+            
+            // Merge based on customer positions
+            if (pos1 == sequence1.size() - 1 && pos2 == 0) {
+                // customer1 is last in route1, customer2 is first in route2
+                merged.customers.addAll(sequence1);
+                merged.customers.addAll(sequence2);
+            } else if (pos1 == 0 && pos2 == sequence2.size() - 1) {
+                // customer1 is first in route1, customer2 is last in route2
+                merged.customers.addAll(sequence2);
+                merged.customers.addAll(sequence1);
+            } else {
+                // Default merge
+                merged.customers.addAll(sequence1);
+                merged.customers.addAll(sequence2);
+            }
+            
+            return merged;
+        }
+        
+        @Override
+        public Individual call() throws Exception {
+            Individual bestIndividual = null;
+            long stagnationCounter = 0;
+            long lastImprovementGeneration = 0;
+            
+            for (long generation = 0; generation < maxGenerations; generation++) {
+                generationCounter.incrementAndGet();
+                
+                // Evolution step
+                evolvePopulation();
+                
+                // Update population statistics
+                population.calculateStatistics();
+                
+                // Track best individual
+                Individual currentBest = population.getBestIndividual();
+                if (bestIndividual == null || currentBest.getFitness() < bestIndividual.getFitness()) {
+                    bestIndividual = currentBest.clone();
+                    lastImprovementGeneration = generation;
+                    stagnationCounter = 0;
+                    
+                    // Update global best
+                    synchronized (AdvancedVRPTWGeneticSolver.class) {
+                        if (bestIndividual.getFitness() < globalBestFitness) {
+                            globalBestFitness = bestIndividual.getFitness();
+                            globalBestGeneration = generation;
+                        }
+                    }
+                } else {
+                    stagnationCounter++;
+                }
+                
+                // Adaptive parameter adjustment
+                if (generation % ADAPTIVE_PARAMETERS_INTERVAL == 0) {
+                    adaptParameters(stagnationCounter);
+                }
+                
+                // Local search application
+                if (generation % LOCAL_SEARCH_FREQUENCY == 0) {
+                    applyLocalSearch();
+                }
+                
+                // Migration
+                if (generation % ARCHIPELAGO_MIGRATION_INTERVAL == 0) {
+                    handleMigration();
+                }
+                
+                // Diversity maintenance
+                if (generation % DIVERSITY_CHECK_INTERVAL == 0) {
+                    maintainDiversity();
+                }
+                
+                // Population restart if stagnation
+                if (stagnationCounter > RESTART_AFTER_STAGNATION) {
+                    restartPopulation(bestIndividual);
+                    stagnationCounter = 0;
+                }
+                
+                // Logging
+                if (generation % EVOLUTION_LOG_INTERVAL == 0) {
+                    logProgress(generation, bestIndividual);
+                }
+                
+                // Update ages
+                population.updateAges();
+            }
+            
+            return bestIndividual;
+        }
+        
+        private void evolvePopulation() {
+            Population newPopulation = new Population(POPULATION_SIZE);
+            
+            // Elite selection
+            population.sortByFitness();
+            int eliteSize = (int) (POPULATION_SIZE * ELITE_RATE);
+            for (int i = 0; i < eliteSize; i++) {
+                newPopulation.individuals.add(population.individuals.get(i).clone());
+            }
+            
+            // Generate offspring
+            while (newPopulation.individuals.size() < POPULATION_SIZE) {
+                Individual parent1 = operators.tournamentSelection(population);
+                Individual parent2 = operators.tournamentSelection(population);
+                
+                Individual[] offspring;
+                if (random.nextDouble() < currentCrossoverRate) {
+                    offspring = operators.crossover(parent1, parent2);
+                } else {
+                    offspring = new Individual[]{parent1.clone(), parent2.clone()};
+                }
+                
+                for (Individual child : offspring) {
+                    if (random.nextDouble() < currentMutationRate) {
+                        operators.mutate(child);
+                    }
+                    
+                    if (newPopulation.individuals.size() < POPULATION_SIZE) {
+                        newPopulation.individuals.add(child);
+                    }
+                }
+            }
+            
+            population = newPopulation;
+        }
+        
+        private void adaptParameters(long stagnationCounter) {
+            // Adaptive mutation rate
+            if (stagnationCounter > 1000) {
+                currentMutationRate = Math.min(0.5, currentMutationRate * 1.1);
+            } else if (stagnationCounter < 100) {
+                currentMutationRate = Math.max(0.05, currentMutationRate * 0.9);
+            }
+            
+            // Adaptive crossover rate
+            if (population.diversityIndex < MIN_DIVERSITY_THRESHOLD) {
+                currentCrossoverRate = Math.max(0.5, currentCrossoverRate * 0.9);
+            } else {
+                currentCrossoverRate = Math.min(0.95, currentCrossoverRate * 1.05);
+            }
+            
+            // Adaptive tournament size
+            if (stagnationCounter > 500) {
+                currentTournamentSize = Math.min(15, currentTournamentSize + 1);
+            } else if (stagnationCounter < 50) {
+                currentTournamentSize = Math.max(3, currentTournamentSize - 1);
+            }
+        }
+        
+        private void applyLocalSearch() {
+            // Apply local search to best individuals
+            population.sortByFitness();
+            int numToImprove = Math.min(10, population.individuals.size() / 10);
+            
+            for (int i = 0; i < numToImprove; i++) {
+                Individual individual = population.individuals.get(i);
+                localSearch.improveIndividual(individual);
+            }
+        }
+        
+        private void handleMigration() {
+            // Send best individuals to migration queue
+            population.sortByFitness();
+            int numToMigrate = Math.max(1, (int) (POPULATION_SIZE * MIGRATION_RATE));
+            
+            for (int i = 0; i < numToMigrate; i++) {
+                Individual migrant = population.individuals.get(i).clone();
+                migrationQueue.offer(migrant);
+            }
+            
+            // Receive migrants
+            List<Individual> migrants = new ArrayList<>();
+            Individual migrant;
+            while ((migrant = migrationQueue.poll()) != null && migrants.size() < numToMigrate) {
+                migrants.add(migrant);
+            }
+            
+            // Replace worst individuals with migrants
+            if (!migrants.isEmpty()) {
+                population.sortByFitness();
+                for (int i = 0; i < migrants.size(); i++) {
+                    int replaceIndex = POPULATION_SIZE - 1 - i;
+                    if (replaceIndex >= 0) {
+                        population.individuals.set(replaceIndex, migrants.get(i));
+                    }
+                }
+            }
+        }
+        
+        private void maintainDiversity() {
+            if (population.diversityIndex < MIN_DIVERSITY_THRESHOLD) {
+                // Introduce new random individuals
+                int numNewIndividuals = POPULATION_SIZE / 10;
+                population.sortByFitness();
+                
+                for (int i = 0; i < numNewIndividuals; i++) {
+                    int replaceIndex = POPULATION_SIZE - 1 - i;
+                    if (replaceIndex >= 0) {
+                        population.individuals.set(replaceIndex, createRandomIndividual());
+                    }
+                }
+            }
+        }
+        
+        private void restartPopulation(Individual bestIndividual) {
+            // Keep best individuals and generate new ones
+            population.sortByFitness();
+            int keepSize = POPULATION_SIZE / 10;
+            
+            List<Individual> survivors = new ArrayList<>();
+            for (int i = 0; i < keepSize; i++) {
+                survivors.add(population.individuals.get(i).clone());
+            }
+            
+            // Generate new population
+            population = new Population(POPULATION_SIZE);
+            population.individuals.addAll(survivors);
+            
+            while (population.individuals.size() < POPULATION_SIZE) {
+                population.individuals.add(createRandomIndividual());
+            }
+        }
+        
+        private void logProgress(long generation, Individual bestIndividual) {
+            System.out.printf("Island %d - Generation %d: Best Fitness = %.2f, " +
+                            "Avg Fitness = %.2f, Diversity = %.3f, " +
+                            "Mutation Rate = %.3f, Total Evaluations = %d%n",
+                    islandId, generation, bestIndividual.getFitness(),
+                    population.averageFitness, population.diversityIndex,
+                    currentMutationRate, totalEvaluations.get());
+        }
+    }
+    
+    // Helper classes
+    static class SavingsPair {
+        int customer1, customer2;
+        double saving;
+        
+        public SavingsPair(int customer1, int customer2, double saving) {
+            this.customer1 = customer1;
+            this.customer2 = customer2;
+            this.saving = saving;
+        }
+    }
+    
+    static class CustomerAngle {
+        int customerId;
+        double angle;
+        
+        public CustomerAngle(int customerId, double angle) {
+            this.customerId = customerId;
+            this.angle = angle;
+        }
+    }
+    
+    // Main solving method
+    public static void solve() {
+        System.out.println("Starting Advanced VRPTW Genetic Algorithm Solver...");
+        System.out.println("Problem Parameters:");
+        System.out.println("- Customers: " + NUM_CUSTOMERS);
+        System.out.println("- Vehicles: " + NUM_VEHICLES);
+        System.out.println("- Population Size: " + POPULATION_SIZE);
+        System.out.println("- Max Generations: " + MAX_GENERATIONS);
+        System.out.println("- Threads: " + NUM_THREADS);
+        
+        // Initialize problem data
+        initializeProblemData();
+        
+        // Create thread pool
+        ExecutorService executor = Executors.newFixedThreadPool(NUM_THREADS);
+        
+        // Migration queue for island communication
+        BlockingQueue<Individual> migrationQueue = new LinkedBlockingQueue<>();
+        
+        // Shared generation counter
+        AtomicLong generationCounter = new AtomicLong(0);
+        
+        // Create genetic islands
+        List<Future<Individual>> futures = new ArrayList<>();
+        for (int i = 0; i < NUM_THREADS; i++) {
+            GeneticIsland island = new GeneticIsland(i, MAX_GENERATIONS / NUM_THREADS,
+                    generationCounter, migrationQueue);
+            futures.add(executor.submit(island));
+        }
+        
+        // Wait for completion and collect results
+        Individual bestSolution = null;
+        for (Future<Individual> future : futures) {
+            try {
+                Individual solution = future.get();
+                if (bestSolution == null || solution.getFitness() < bestSolution.getFitness()) {
+                    bestSolution = solution;
+                }
+            } catch (Exception e) {
+                System.err.println("Error in genetic island: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+        
+        executor.shutdown();
+        
+        // Print final results
+        printResults(bestSolution);
+    }
+    
+    private static void initializeProblemData() {
+        // Initialize depot
+        depot = new Depot(50.0, 50.0, 0.0, 1440.0); // 24 hours
+        
+        // Initialize customers
+        customers = new Customer[NUM_CUSTOMERS];
+        Random random = new Random(42);
+        
+        for (int i = 0; i < NUM_CUSTOMERS; i++) {
+            double x = random.nextDouble() * 100;
+            double y = random.nextDouble() * 100;
+            int demand = random.nextInt(50) + 1;
+            double earliestTime = random.nextDouble() * 600; // 0-10 hours
+            double latestTime = earliestTime + random.nextDouble() * 400 + 200; // Service window
+            double priority = random.nextDouble() * 10;
+            
+            customers[i] = new Customer(i, x, y, demand, earliestTime, latestTime, priority);
+        }
+        
+        // Initialize distance matrix
+        distanceMatrix = new double[NUM_CUSTOMERS][NUM_CUSTOMERS];
+        for (int i = 0; i < NUM_CUSTOMERS; i++) {
+            for (int j = 0; j < NUM_CUSTOMERS; j++) {
+                if (i != j) {
+                    distanceMatrix[i][j] = customers[i].getDistanceTo(customers[j]);
+                } else {
+                    distanceMatrix[i][j] = 0.0;
+                }
+            }
+        }
+        
+        // Initialize operation counters
+        operationCounters.put("crossover", new AtomicLong(0));
+        operationCounters.put("mutation", new AtomicLong(0));
+        operationCounters.put("selection", new AtomicLong(0));
+        operationCounters.put("local_search", new AtomicLong(0));
+        
+        System.out.println("Problem data initialized successfully.");
+    }
+    
+    private static void printResults(Individual bestSolution) {
+        System.out.println("\n" + "=".repeat(80));
+        System.out.println("FINAL RESULTS");
+        System.out.println("=".repeat(80));
+        
+        if (bestSolution != null) {
+            System.out.printf("Best Fitness: %.2f%n", bestSolution.getFitness());
+            System.out.printf("Best Generation: %d%n", globalBestGeneration);
+            System.out.printf("Total Evaluations: %d%n", totalEvaluations.get());
+            System.out.printf("Total Generations: %d%n", totalGenerations.get());
+            
+            // Print objectives
+            System.out.println("\nObjective Values:");
+            for (Map.Entry<String, Double> entry : bestSolution.objectives.entrySet()) {
+                System.out.printf("- %s: %.2f%n", entry.getKey(), entry.getValue());
+            }
+            
+            // Print route details
+            System.out.println("\nRoute Details:");
+            double totalDistance = 0.0;
+            double totalTime = 0.0;
+            int totalDemand = 0;
+            int feasibleRoutes = 0;
+            
+            for (int i = 0; i < bestSolution.routes.size(); i++) {
+                Route route = bestSolution.routes.get(i);
+                if (!route.customers.isEmpty()) {
+                    route.calculateMetrics();
+                    totalDistance += route.totalDistance;
+                    totalTime += route.totalTime;
+                    totalDemand += route.totalDemand;
+                    
+                    if (route.feasible) {
+                        feasibleRoutes++;
+                    }
+                    
+                    System.out.printf("Route %d: %s (Distance: %.2f, Time: %.2f, Demand: %d, Feasible: %s)%n",
+                            i + 1, route.customers, route.totalDistance, route.totalTime,
+                            route.totalDemand, route.feasible ? "Yes" : "No");
+                }
+            }
+            
+            System.out.println("\nSummary:");
+            System.out.printf("Total Distance: %.2f%n", totalDistance);
+            System.out.printf("Total Time: %.2f%n", totalTime);
+            System.out.printf("Total Demand: %d%n", totalDemand);
+            System.out.printf("Number of Vehicles Used: %d%n", 
+                    (int) bestSolution.routes.stream().filter(r -> !r.customers.isEmpty()).count());
+            System.out.printf("Feasible Routes: %d%n", feasibleRoutes);
+            System.out.printf("Solution Valid: %s%n", bestSolution.isValid() ? "Yes" : "No");
+            
+            // Print operation statistics
+            System.out.println("\nOperation Statistics:");
+            for (Map.Entry<String, AtomicLong> entry : operationCounters.entrySet()) {
+                System.out.printf("- %s: %d%n", entry.getKey(), entry.getValue().get());
+            }
+        } else {
+            System.out.println("No solution found!");
+        }
+        
+        System.out.println("=".repeat(80));
+    }
+    
+    // Main method
+    public static void main(String[] args) {
+        long startTime = System.currentTimeMillis();
+        
+        try {
+            solve();
+        } catch (Exception e) {
+            System.err.println("Error during solving: " + e.getMessage());
+            e.printStackTrace();
+        }
+        
+        long endTime = System.currentTimeMillis();
+        long executionTime = endTime - startTime;
+        
+        System.out.println("\nExecution Time: " + executionTime + " ms (" + 
+                         (executionTime / 1000.0) + " seconds)");
+    }
+}
