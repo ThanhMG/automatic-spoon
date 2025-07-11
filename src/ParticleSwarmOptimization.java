@@ -7,9 +7,9 @@ public class ParticleSwarmOptimization {
     
     // Bài toán tối ưu hóa phức tạp: Tìm minimum của hàm Rastrigin 100 chiều
     // f(x) = 10*n + Σ(xi² - 10*cos(2π*xi)) với n=100
-    private static final int DIMENSIONS = 100;
-    private static final int POPULATION_SIZE = 2000;
-    private static final int MAX_ITERATIONS = 1000000; // 1 triệu iterations
+    private static final int DIMENSIONS = 10000;
+    private static final int POPULATION_SIZE = 200000;
+    private static final int MAX_ITERATIONS = 10000000;
     private static final double SEARCH_SPACE_MIN = -5.12;
     private static final double SEARCH_SPACE_MAX = 5.12;
     private static final int NUM_THREADS = 4;
