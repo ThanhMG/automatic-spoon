@@ -1,4 +1,4 @@
-name: AdvancedVRPTWGeneticSolver runner
+name: GeneticAlgorithmTSP runner
 
 on:
   workflow_dispatch:
@@ -15,5 +15,5 @@ jobs:
           distribution: 'temurin'
       - name: Compile and run Java
         run: |
-          javac src/AdvancedVRPTWGeneticSolver.java
-          java -cp src AdvancedVRPTWGeneticSolver
+          javac src/GeneticAlgorithmTSP.java
+          java -cp src GeneticAlgorithmTSP
